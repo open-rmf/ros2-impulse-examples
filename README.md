@@ -1,6 +1,10 @@
 ## Building workflows with ROS nodes
 
-The examples in this directory showcase how to incorporate ROS primitives into a workflow.
+The examples in this directory showcase how to incorporate ROS primitives into a workflow. We model a small portion of a navigation workflow that involves receiving goals, fetching paths to connect those goals from a planning service, and then queuing up the paths for execution.
+
+This diagram represents the workflow implemented by `src/nav_example.rs`:
+
+![nav-example-workflow](assets/figures/nav-example.png)
 
 We use rclrs for this demo, and currently the build pipeline to use ROS messages for rclrs takes some extra steps since Rust is not (yet) a core language for ROS.
 
