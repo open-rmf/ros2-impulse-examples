@@ -1,6 +1,7 @@
 [package]
 name = "ros2-workflow-examples"
 edition = "2021"
+version = "0.0.1"
 
 [[bin]]
 name = "nav-example"
@@ -17,7 +18,7 @@ path = "src/goal_requester.rs"
 [dependencies]
 bevy_app = "0.12"
 bevy_core = "0.12"
-bevy_impulse = { git = "https://github.com/open-rmf/bevy_impulse", branch = "main", features = ["diagram"] }
+bevy_impulse = { git = "https://github.com/open-rmf/bevy_impulse", branch = "expand_prelude", features = ["diagram"] }
 serde = "*"
 schemars = "*"
 serde_json = "*"

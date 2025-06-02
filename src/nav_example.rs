@@ -31,6 +31,8 @@ use nav_msgs::{
     srv::{GetPlan, GetPlan_Request, GetPlan_Response},
 };
 
+use std_msgs::msg::Empty as EmptyMsg;
+
 fn main() {
     let context = Context::default_from_env().unwrap();
     let mut executor = context.create_basic_executor();
@@ -51,22 +53,20 @@ fn main() {
                     let (sender, mut receiver) = unbounded_channel();
 
                     let _subscription = node.create_subscription(
-                        config
-                        .topic
-                        .transient_local(),
+                        config.topic.transient_local(),
                         move |msg: Goals| {
                             let _ = sender.send(msg);
                         }
                     ).unwrap();
 
-                    let node = node.clone();
-                    log!(&*node, "Waiting to receive goals from topic {}...", config.topic);
+                    let logger = node.logger().clone();
+                    log!(&logger, "Waiting to receive goals from topic {}...", config.topic);
                     async move {
                         // Force the _subscription variable to be captured since
                         // it has side effects.
                         let _subscription = _subscription;
                         while let Some(msg) = receiver.recv().await {
-                            log!(&*node, "Received a sequence of {} goals", msg.goals.len());
+                            log!(&logger, "Received a sequence of {} goals", msg.goals.len());
                             input.streams.goals.send(msg);
                         }
                     }
@@ -87,41 +87,44 @@ fn main() {
         .no_deserializing()
         .register_node_builder(
             NodeBuilderOptions::new("fetch_plans"),
-            move |builder, config: PlanningConfig| {
-                let tolerance = config.tolerance;
-                let client = node.create_client::<GetPlan>(&config.planner_service).unwrap();
+            {
+                let node = node.clone();
+                move |builder, config: PlanningConfig| {
+                    let tolerance = config.tolerance;
+                    let client = node.create_client::<GetPlan>(&config.planner_service).unwrap();
 
-                let logger = node.logger().clone();
-                builder.create_map(move |input: AsyncMap<Goals, PlanStream>| {
-                    let client = client.clone();
-                    let logger = logger.clone();
-                    async move {
-                        log!(&logger, "Waiting for planning service...");
-                        client.notify_on_service_ready().await.unwrap();
+                    let logger = node.logger().clone();
+                    builder.create_map(move |input: AsyncMap<Goals, PathStream>| {
+                        let client = client.clone();
+                        let logger = logger.clone();
+                        async move {
+                            log!(&logger, "Waiting for planning service...");
+                            client.notify_on_service_ready().await.unwrap();
 
-                        let mut from_iter = input.request.goals.iter();
-                        let mut to_iter = input.request.goals.iter().skip(1);
+                            let mut from_iter = input.request.goals.iter();
+                            let mut to_iter = input.request.goals.iter().skip(1);
 
-                        let mut plan_promises = VecDeque::new();
-                        while let (Some(start), Some(goal)) = (from_iter.next().cloned(), to_iter.next().cloned()) {
-                            log!(&logger, "Requesting a plan from {start:?} to {goal:?}");
-                            let request = GetPlan_Request { start, goal, tolerance };
-                            let promise: Promise<GetPlan_Response> = client.call(request).unwrap();
-                            plan_promises.push_back(promise);
+                            let mut plan_promises = VecDeque::new();
+                            while let (Some(start), Some(goal)) = (from_iter.next().cloned(), to_iter.next().cloned()) {
+                                log!(&logger, "Requesting a plan from {start:?} to {goal:?}");
+                                let request = GetPlan_Request { start, goal, tolerance };
+                                let promise: Promise<GetPlan_Response> = client.call(request).unwrap();
+                                plan_promises.push_back(promise);
+                            }
+
+                            while let Some(promise) = plan_promises.pop_front() {
+                                let response = promise.await.unwrap();
+                                log!(
+                                    &logger,
+                                    "Received a plan from {:?} to {:?}",
+                                    response.plan.poses.first().map(|x| x.pose.clone()),
+                                    response.plan.poses.last().map(|x| x.pose.clone()),
+                                );
+                                input.streams.paths.send(response.plan);
+                            }
                         }
-
-                        while let Some(promise) = plan_promises.pop_front() {
-                            let response = promise.await.unwrap();
-                            log!(
-                                &logger,
-                                "Received a plan from {:?} to {:?}",
-                                response.plan.poses.first().map(|x| x.pose.clone()),
-                                response.plan.poses.last().map(|x| x.pose.clone()),
-                            );
-                            input.streams.plans.send(response.plan);
-                        }
-                    }
-                })
+                    })
+                }
             }
         );
 
@@ -146,10 +149,62 @@ fn main() {
         .no_deserializing()
         .register_message::<Path>();
 
+    // We'll provide a topic for clearing the goals from the buffer
+    registry.register_node_builder(
+        NodeBuilderOptions::new("receive_cancel"),
+        {
+            let node = node.clone();
+            move |builder, config: SubscriptionConfig| {
+                let node = node.clone();
+                builder.create_map(move |input: AsyncMap<(), ClearSignalString>| {
+                    let (sender, mut receiver) = unbounded_channel();
+
+                    let _subscription = node.create_subscription(
+                        config.topic.transient_local(),
+                        move |_msg: EmptyMsg| {
+                            let _ = sender.send(());
+                        }
+                    ).unwrap();
+
+                    let logger = node.logger().clone();
+                    async move {
+                        // Force the _subscription variable to be captured since
+                        // it has side effects.
+                        let _subscription = _subscription;
+                        while let Some(_) = receiver.recv().await {
+                            log!(&logger, "Received a request to clear the goals");
+                            input.streams.clear.send(());
+                        }
+                    }
+                })
+            }
+        }
+    );
+
+    let clear_paths = app.world.spawn_service(clear_paths.into_blocking_service());
+    registry
+        .opt_out()
+        .no_serializing()
+        .no_deserializing()
+        .register_node_builder(
+            NodeBuilderOptions::new("clear_paths"),
+            move |builder, _config: ()| {
+                builder.create_node(clear_paths)
+            }
+        )
+        .with_buffer_access();
+
     let diagram = Diagram::from_json(json!({
         "version": "0.1.0",
-        "start": "receive_goals",
+        "start": "setup",
         "ops": {
+            "setup": {
+                "type": "fork_clone",
+                "next": [
+                    "receive_goals",
+                    "receive_cancel"
+                ]
+            },
             "receive_goals": {
                 "type": "node",
                 "builder": "receive_goals",
@@ -169,22 +224,43 @@ fn main() {
                     "tolerance": 0.1
                 },
                 "stream_out": {
-                    "plans": "plan_buffer"
+                    "paths": "path_buffer"
                 },
                 "next": { "builtin": "dispose" }
             },
-            "plan_buffer": {
+            "path_buffer": {
                 "type": "buffer",
                 "settings": { "retention": "keep_all" }
             },
-            "listen_to_plan_buffer": {
+            "listen_to_path_buffer": {
                 "type": "listen",
-                "buffers": ["plan_buffer"],
+                "buffers": ["path_buffer"],
                 "next": "print_paths",
             },
             "print_paths": {
                 "type": "node",
                 "builder": "print_paths",
+                "next": { "builtin": "dispose" }
+            },
+            "receive_cancel": {
+                "type": "node",
+                "builder": "receive_cancel",
+                "config": {
+                    "topic": "cancel_goals"
+                },
+                "stream_out": {
+                    "clear": "access_paths"
+                },
+                "next": { "builtin": "dispose" }
+            },
+            "access_paths": {
+                "type": "buffer_access",
+                "buffers": ["path_buffer"],
+                "next": "clear_paths"
+            },
+            "clear_paths": {
+                "type": "node",
+                "builder": "clear_paths",
                 "next": { "builtin": "dispose" }
             }
         }
@@ -228,8 +304,13 @@ struct PlanningConfig {
 }
 
 #[derive(StreamPack)]
-struct PlanStream {
-    plans: Path,
+struct PathStream {
+    paths: Path,
+}
+
+#[derive(StreamPack)]
+struct ClearSignalString {
+    clear: (),
 }
 
 fn print_paths(
@@ -239,4 +320,13 @@ fn print_paths(
     let buffer = access.get(&key).unwrap();
     let paths: Vec<&Path> = buffer.iter().collect();
     println!("Paths currently waiting to run:\n{paths:#?}");
+}
+
+fn clear_paths(
+    In((_, key)): In<((), BufferKey<Path>)>,
+    mut access: BufferAccessMut<Path>,
+) {
+    let mut buffer = access.get_mut(&key).unwrap();
+    // Remove all goals from the buffer by draining its full range.
+    buffer.drain(..);
 }

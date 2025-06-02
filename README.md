@@ -24,6 +24,8 @@ pip install git+https://github.com/colcon/colcon-cargo.git --break-system-packag
 pip install git+https://github.com/colcon/colcon-ros-cargo.git --break-system-packages
 ```
 
+Create a workspace with the necessary repos:
+
 ```bash
 mkdir -p workspace/src && cd workspace
 ```
@@ -33,8 +35,10 @@ git clone https://github.com/open-rmf/ros2-impulse-examples src/ros2-impulse-exa
 ```
 
 ```bash
-vcs import src < src/bevy_impulse/examples/ros2/example-messages.repos
+vcs import src < src/ros2-impulse-examples/example-messages.repos
 ```
+
+Source the ROS distro and build the workspace:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -50,12 +54,45 @@ colcon build
 source install/setup.bash
 ```
 
-Then you can go into the `bevy_impulse` directory and run the example with
+Then you can go into the `ros2-impulse-examples` directory and run the example with
 
 ```bash
-cd src/bevy_impulse
+cd src/ros2-impulse-examples
 ```
 
 ```bash
-cargo run -p ros2-workflow-examples --bin nav-example
+cargo run --bin nav-example
 ```
+
+The `nav-example` workflow will wait until it receives some goals to process. You can send it some randomized goals by **opening a new terminal** in the same directory and running
+
+```bash
+source ../../install/setup.bash
+```
+
+```bash
+cargo run --bin goal-requester
+```
+
+Now the `nav-example` workflow will wait until a planner service is available for it to send `GetPlan` service requests to. Using the last terminal, run
+
+```bash
+cargo run --bin fake-plan-generator
+```
+
+Now the workflow will print out all the plans that it has received from the `fake-plan-generator` and stored in its buffer. If the workflow were connected to a real navigation system, it could pull these plans from the buffer one at a time and execute them.
+
+Our workflow also allows the paths to be cleared out of the buffer, i.e. "cancelled". To cancel the current set of goals, run:
+
+```bash
+cargo run --bin goal-requester -- --cancel
+```
+
+After that you should see a printout of
+
+```
+Paths currently waiting to run:
+[]
+```
+
+which indicates that the buffer has been successfully cleared out.
